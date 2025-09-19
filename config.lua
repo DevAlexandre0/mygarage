@@ -4,11 +4,14 @@ Config = {}
 Config.PayAccount = 'bank'          -- 'bank' หรือ 'money'
 Config.ImpoundPrice = 2500          -- ราคาเดียวทั้งระบบ
 
+-- ไอเท็มสัญญา
+Config.ContractItem = 'veh_contract'
+
 -- ทั่วไป
-Config.PlatePattern = 'AAA 111'     -- ^%u%u%u %d%d%d$
+Config.PlatePattern = 'AAA 111'     -- ใช้ตรวจรูปแบบ ^%u%u%u %d%d%d$
 Config.DespawnOnStore = true
 Config.SpawnRadiusCheck = 3.5       -- กันสปอว์นทับ
-Config.PositionUpdateInterval = 5000 -- ms อัปเดตพิกัด active
+Config.PositionUpdateInterval = 5000 -- ms ส่งพิกัด active แบบ threshold
 
 -- จุด Garage/Impound (global access)
 Config.Garages = {
@@ -36,6 +39,3 @@ Config.Blips = {
   { sprite=50,  color=3,  scale=0.75, label='Public Garage', type='public'  },
   { sprite=67,  color=1,  scale=0.75, label='Impound',       type='impound' },
 }
-
--- ไอเท็มสัญญา
-Config.ContractItem = 'veh_contract'
