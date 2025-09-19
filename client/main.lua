@@ -26,36 +26,36 @@ CreateThread(function()
   end
 end)
 
--- ===== Helpers: event-driven position updates
+-- ===== Position reporter: event-driven threshold
 local function startPositionReporter(plate, veh, netId)
   local lastSend = GetGameTimer()
   local lastPos = GetEntityCoords(veh)
   CreateThread(function()
     while DoesEntityExist(veh) do
-      Wait(1000) -- tick เบามาก
+      Wait(1000) -- 1s tick เบา
       local now = GetGameTimer()
       local pos = GetEntityCoords(veh)
       local dist = #(pos - lastPos)
       if dist > 75.0 or (now - lastSend) > 15000 then
-        TriggerServerEvent('esx_garage:updateVehiclePos', plate, pos.x, pos.y, pos.z, netId)
+        TriggerServerEvent('esx_garage:vehicle:active:update', plate, pos.x, pos.y, pos.z, netId)
         lastSend = now; lastPos = pos
       end
       if IsEntityDead(veh) then
-        TriggerServerEvent('esx_garage:autoImpound', plate)
-        TriggerServerEvent('esx_garage:clearActive', plate)
+        TriggerServerEvent('esx_garage:impound:auto', plate)
+        TriggerServerEvent('esx_garage:vehicle:active:clear', plate)
         break
       end
     end
     if not DoesEntityExist(veh) then
-      TriggerServerEvent('esx_garage:autoImpound', plate)
-      TriggerServerEvent('esx_garage:clearActive', plate)
+      TriggerServerEvent('esx_garage:impound:auto', plate)
+      TriggerServerEvent('esx_garage:vehicle:active:clear', plate)
     end
   end)
 end
 
 -- ===== Menus
 function OpenGarageMenu(garage)
-  local vehicles = lib.callback.await('esx_garage:getPlayerVehicles', false)
+  local vehicles = lib.callback.await('esx_garage:garage:list', false)
   local opts = {}
 
   if IsPedInAnyVehicle(PlayerPedId(), false) then
@@ -68,9 +68,8 @@ function OpenGarageMenu(garage)
         if not isPlateValid(plate) then lib.notify({ title='ป้ายทะเบียนผิดรูปแบบ', type='error' }); return end
         local status = { engine=GetVehicleEngineHealth(veh) or 1000.0, body=GetVehicleBodyHealth(veh) or 1000.0, fuel=GetVehicleFuelLevel(veh) or 50.0 }
         local netId = NetworkGetNetworkIdFromEntity(veh)
-        local ok = lib.callback.await('esx_garage:storeVehicle', false, plate, status, netId)
+        local ok = lib.callback.await('esx_garage:garage:store', false, plate, status, netId)
         if ok and ok.ok then
-          -- ฝั่งเซิร์ฟเวอร์จะ DeleteEntity ให้แล้ว
           lib.notify({ title=('เก็บ %s แล้ว'):format(plate), type='success' })
         else
           lib.notify({ title='เก็บไม่ได้', description=ok and ok.reason or '', type='error' })
@@ -92,28 +91,26 @@ function OpenGarageMenu(garage)
           lib.notify({ title='รถถูกยึด', description='ไปที่ Impound', type='error' }); return
         end
         if v.state == 'out_garage' then
-          local res = lib.callback.await('esx_garage:getVehicleCoords', false, v.plate)
+          local res = lib.callback.await('esx_garage:vehicle:coords', false, v.plate)
           if res and res.ok then SetNewWaypoint(res.coords.x + 0.0, res.coords.y + 0.0); lib.notify({ title='ตั้ง waypoint แล้ว', type='inform' })
           else lib.notify({ title='ไม่พบพิกัด', description=res and res.reason or '', type='error' }) end
           return
         end
 
-        -- choose free spot
+        -- เลือกจุด spawn ว่าง
         local free
         for _, s in ipairs(garage.spawn) do
           if not IsAnyVehicleNearPoint(s.x, s.y, s.z, Config.SpawnRadiusCheck) then free = s break end
         end
         if not free then lib.notify({ title='จุดสปอว์นเต็ม', type='error' }); return end
 
-        local grant = lib.callback.await('esx_garage:takeOutVehicle', false, v.plate)
+        local grant = lib.callback.await('esx_garage:garage:takeout', false, v.plate)
         if not grant or not grant.ok then lib.notify({ title='สปอว์นล้มเหลว', description=grant and grant.reason or '', type='error' }); return end
 
-        -- สร้างรถ “โดยเซิร์ฟเวอร์”
         local model = (grant.props and grant.props.model) or (v.vehicle and v.vehicle.model) or 'adder'
-        local spawnRes = lib.callback.await('esx_garage:spawnOwnedVehicle', false, { plate = v.plate, model = model, pos = { x = free.x, y = free.y, z = free.z, w = free.w } })
+        local spawnRes = lib.callback.await('esx_garage:vehicle:spawn', false, { plate=v.plate, model=model, pos={ x=free.x, y=free.y, z=free.z, w=free.w } })
         if not spawnRes or not spawnRes.ok then lib.notify({ title='สร้างรถล้มเหลว', description=spawnRes and spawnRes.reason or '', type='error' }); return end
 
-        -- apply saved props client-side
         local veh = NetworkGetEntityFromNetworkId(spawnRes.netId)
         if veh and veh ~= 0 then
           local pr = grant.props or v.vehicle
@@ -137,7 +134,7 @@ function OpenGarageMenu(garage)
 end
 
 function OpenImpoundMenu(garage)
-  local vehicles = lib.callback.await('esx_garage:getImpoundedVehicles', false)
+  local vehicles = lib.callback.await('esx_garage:impound:list', false)
   local opts = {}
   for i=1, #vehicles do
     local v = vehicles[i]
@@ -153,10 +150,10 @@ function OpenImpoundMenu(garage)
         end
         if not free then lib.notify({ title='จุดสปอว์นเต็ม', type='error' }); return end
 
-        local ok = lib.callback.await('esx_garage:payRelease', false, v.plate)
+        local ok = lib.callback.await('esx_garage:impound:release', false, v.plate)
         if not ok or not ok.ok then lib.notify({ title='ชำระล้มเหลว', description=ok and ok.reason or '', type='error' }); return end
 
-        local spawnRes = lib.callback.await('esx_garage:spawnOwnedVehicle', false, { plate = v.plate, model = model, pos = { x = free.x, y = free.y, z = free.z, w = free.w } })
+        local spawnRes = lib.callback.await('esx_garage:vehicle:spawn', false, { plate=v.plate, model=model, pos={ x=free.x, y=free.y, z=free.z, w=free.w } })
         if not spawnRes or not spawnRes.ok then lib.notify({ title='สร้างรถล้มเหลว', description=spawnRes and spawnRes.reason or '', type='error' }); return end
 
         local veh = NetworkGetEntityFromNetworkId(spawnRes.netId)
@@ -179,20 +176,32 @@ function OpenImpoundMenu(garage)
   lib.showContext('esx_garage_impound')
 end
 
--- ===== Contract item handler (คงไฟล์ server/contract.lua เดิม)
-RegisterNetEvent('esx_garage:useContract', function()
+-- ===== Contract
+RegisterNetEvent('esx_garage:contract:use', function()
   local ped = PlayerPedId()
   local veh = GetVehiclePedIsIn(ped, false)
   if veh == 0 then lib.notify({ title='ต้องยืนใกล้รถของคุณ', type='error' }); return end
   local plate = string.upper(GetVehicleNumberPlateText(veh) or '')
   if not isPlateValid(plate) then lib.notify({ title='ป้ายทะเบียนผิดรูปแบบ', type='error' }); return end
+
   local input = lib.inputDialog('โอนกรรมสิทธิ์รถ', {
     { type='number', label='Server ID ผู้รับ', required=true, min=1 },
     { type='number', label='ราคา', required=true, min=0 }
-  }); if not input then return end
+  })
+  if not input then return end
   local target, price = tonumber(input[1]), tonumber(input[2])
-  local agree = lib.alertDialog({ header='ยืนยันสัญญา', content=('ขาย %s ให้ %s ราคา %d ?'):format(plate, target, price), centered=true, cancel=true })
+
+  local agree = lib.alertDialog({
+    header='ยืนยันสัญญา',
+    content=('ขาย %s ให้ %s ราคา %d ?'):format(plate, target, price),
+    centered=true, cancel=true
+  })
   if agree ~= 'confirm' then return end
-  local res = lib.callback.await('esx_garage:transferVehicle', false, { plate=plate, target=target, price=price })
-  if res and res.ok then lib.notify({ title='โอนสำเร็จ', type='success' }) else lib.notify({ title='โอนไม่สำเร็จ', description=res and res.reason or '', type='error' }) end
+
+  local res = lib.callback.await('esx_garage:contract:transfer', false, { plate=plate, target=target, price=price })
+  if res and res.ok then
+    lib.notify({ title='โอนสำเร็จ', type='success' })
+  else
+    lib.notify({ title='โอนไม่สำเร็จ', description=res and res.reason or '', type='error' })
+  end
 end)
