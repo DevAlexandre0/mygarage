@@ -1,28 +1,34 @@
 Config = {}
 
 -- การตั้งค่า ESX/Inventory
-Config.UseOxInventory = false -- ตั้ง 'true' เมื่อเชื่อมกับ ox_inventory และ ESX >= 1.6.0
+Config.UseOxInventory = true -- บังคับเชื่อม ox_inventory
+
+-- รูปแบบป้ายทะเบียนของเซิร์ฟเวอร์
+Config.PlatePattern = '^%u%u%u %d%d%d$' -- "AAA 111"
 
 -- การตั้งค่าการสปอว์นและป้องกัน
-Config.SpawnDistanceCheck = 25.0 -- กัน pileup ใกล้จุดจอด
+Config.SpawnDistanceCheck = 25.0
 Config.DespawnOnStore = true
+
+-- รองรับเฉพาะรถยนต์ (กรองด้วย Vehicle Class client-side)
+Config.ForbidVehicleClasses = { [8]=true, [13]=true, [14]=true, [15]=true, [16]=true, [21]=true } -- ห้าม: มอเตอร์ไซค์, จักรยาน, เรือ, ฮ. เครื่องบิน, รถไฟ
 
 -- ค่าปริยาย impound
 Config.Impound = {
   Enabled = true,
-  Jobs = { 'police', 'mechanic' }, -- ผู้มีสิทธิ์ยึด/ปล่อย
-  MinFee = 500,
-  MaxFee = 5000,
-  DefaultHours = 4
+  Jobs = { 'police' },  -- เพิ่ม/แก้ได้
+  MinFee = 100,
+  MaxFee = 100000,
+  DefaultHours = 4,
+  GarageId = 'impound_public' -- virtual impound; ปล่อยรถได้จากเมนูทุกจุด
 }
 
--- ตัวอย่างจุดจอดไม่จำกัด
+-- ตัวอย่างจุดจอด
 Config.Garages = {
-  -- ตัวอย่าง public garage แบบ target + เมนู
   {
     id = 'legion_public',
     label = 'Legion Public Garage',
-    type = 'public', -- public / job / house
+    type = 'public',
     coord = vec3(215.8, -810.1, 30.7),
     heading = 160.0,
     spawn = {
