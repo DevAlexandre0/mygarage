@@ -1,185 +1,259 @@
-local GARAGES = {}
-local currentGarage, previewVeh, previewCam = nil, nil, nil
+local ESX = exports['es_extended']:getSharedObject()
 
--- sync garages from server + config
-RegisterNetEvent('esx_garage:syncGarages', function(list) GARAGES = list end)
-CreateThread(function() TriggerServerEvent('esx_garage:requestGarages') end)
+local usingTarget = GetResourceState('ox_target') == 'started'
+local lastSpawn = nil
+local activeCam = nil
+local previewVeh = nil
 
-local function isCarModel(modelHash)
-  local cls = GetVehicleClassFromName(modelHash)
-  return not Config.ForbidVehicleClasses[cls]
+local function isPlateValid(plate)
+    -- รูปแบบ "AAA 111"
+    return plate and plate:match('^%u%u%u %d%d%d$') ~= nil
 end
 
-local function findFreeSpot(garage)
-  for i=1, #garage.spawn do
-    local s = garage.spawn[i]
-    local veh = GetClosestVehicle(s.x, s.y, s.z, Config.SpawnDistanceCheck, 0, 70)
-    if not DoesEntityExist(veh) then return s end
-  end
-  return nil
+local function destroyPreview()
+    if previewVeh and DoesEntityExist(previewVeh) then
+        DeleteEntity(previewVeh)
+    end
+    previewVeh = nil
+    if activeCam then
+        RenderScriptCams(false, true, 300, true, true)
+        DestroyCam(activeCam, false)
+        activeCam = nil
+    end
 end
 
-local function clearPreview()
-  if DoesEntityExist(previewVeh) then DeleteEntity(previewVeh) end
-  previewVeh = nil
-  if previewCam then RenderScriptCams(false, false, 0, true, true); DestroyCam(previewCam, false) end
-  previewCam = nil
+local function showPreview(garage, model, spot)
+    destroyPreview()
+    if not model or model == '' then model = 'adder' end
+    lib.requestModel(model)
+    -- ยกตัวอย่างพรีวิวแบบ local-only และล็อกตำแหน่ง
+    previewVeh = CreateVehicle(joaat(model), spot.x, spot.y, spot.z, spot.w, false, true)
+    SetEntityCollision(previewVeh, false, false)
+    FreezeEntityPosition(previewVeh, true)
+    SetVehicleOnGroundProperly(previewVeh)
+    -- กล้องพรีวิว
+    local offset = garage.previewCamOffset or vec3(3.0, 3.0, 1.5)
+    activeCam = CreateCam("DEFAULT_SCRIPTED_CAMERA", true)
+    local camPos = GetOffsetFromEntityInWorldCoords(previewVeh, offset.x, offset.y, offset.z)
+    SetCamCoord(activeCam, camPos.x, camPos.y, camPos.z)
+    PointCamAtEntity(activeCam, previewVeh, 0.0, 0.0, 0.0, true)
+    SetCamFov(activeCam, 45.0)
+    RenderScriptCams(true, true, 300, true, true)
 end
 
-local function showPreview(garage, model)
-  clearPreview()
-  local spot = garage.spawn[1] or garage.spawn
-  if not spot then return end
-  lib.requestModel(model)
-  previewVeh = CreateVehicle(joaat(model), spot.x, spot.y, spot.z + 0.05, spot.w, false, false)
-  SetEntityCollision(previewVeh, false, false)
-  SetEntityAlpha(previewVeh, 180, false)
-  FreezeEntityPosition(previewVeh, true)
-
-  local camPos = vec3(spot.x - 5.0, spot.y - 5.0, spot.z + 2.0)
-  previewCam = CreateCam("DEFAULT_SCRIPTED_CAMERA", true)
-  SetCamCoord(previewCam, camPos.x, camPos.y, camPos.z)
-  PointCamAtEntity(previewCam, previewVeh)
-  RenderScriptCams(true, false, 0, true, true)
-end
-
-local function openVehicleSubmenu(garage, v)
-  local model = (v.vehicle and v.vehicle.model) or 'adder'
-  lib.registerContext({
-    id = 'esx_garage_vehicle_actions',
-    title = ('%s'):format(v.plate),
-    options = {
-      {
-        title = 'Preview',
-        onSelect = function() showPreview(garage, model) end
-      },
-      {
-        title = 'Spawn',
-        onSelect = function()
-          clearPreview()
-          if v.impounded == 1 then lib.notify({title='ถูกยึด', type='error'}); return end
-          if v.stored ~= 1 then lib.notify({title='อยู่นอกโรง', type='error'}); return end
-          if not isCarModel(joaat(model)) then lib.notify({title='เฉพาะรถยนต์', type='error'}); return end
-          local free = findFreeSpot(garage)
-          if not free then lib.notify({title='จุดว่างไม่พอ', type='error'}); return end
-          local ok = lib.callback.await('esx_garage:spawnFromServer', false, {
-            plate=v.plate, model=model, garageId=garage.id, coord={x=free.x,y=free.y,z=free.z,w=free.w}
-          })
-          if ok and ok.ok then lib.notify({title=('สปอว์น %s'):format(v.plate), type='success'})
-          else lib.notify({title='สปอว์นล้มเหลว', description=ok and ok.reason or '', type='error'}) end
+local function findFreeSpot(spots)
+    for i = 1, #spots do
+        local s = spots[i]
+        if not IsAnyVehicleNearPoint(s.x, s.y, s.z, 3.5) then
+            return s
         end
-      },
-      {
-        title = 'Transfer to this garage',
-        description = 'ย้ายที่เก็บมายังที่นี่',
-        onSelect = function()
-          local ok = lib.callback.await('esx_garage:transferGarage', false, v.plate, garage.id)
-          if ok and ok.ok then lib.notify({ title='ย้ายสำเร็จ', type='success' })
-          else lib.notify({ title='ย้ายไม่สำเร็จ', description=ok and ok.reason or '', type='error' }) end
-        end
-      }
-    }
-  })
-  lib.showContext('esx_garage_vehicle_actions')
+    end
+    return nil
+end
+
+local function openImpoundMenu(garage)
+    local vehicles = lib.callback.await('esx_garage:getImpoundVehicles', false)
+    local options = {}
+    for i = 1, #vehicles do
+        local v = vehicles[i]
+        local model = (v.vehicle and v.vehicle.model) or 'adder'
+        options[#options+1] = {
+            title = ('%s | ค่าปลด %d'):format(v.plate, v.impound_fee or 0),
+            description = ('%s'):format(model),
+            arrow = true,
+            onSelect = function()
+                local spot = findFreeSpot(garage.spawn)
+                if not spot then
+                    lib.notify({ title = 'ไม่มีที่ว่าง', type = 'error' })
+                    return
+                end
+                showPreview(garage, model, spot)
+                local ok = lib.alertDialog({
+                    header = ('ปลดรถ %s'):format(v.plate),
+                    content = ('ยืนยันชำระค่าปลด %d ?'):format(v.impound_fee or 0),
+                    centered = true,
+                    cancel = true,
+                    labels = { confirm = 'ชำระและสปอว์น' }
+                })
+                if ok ~= 'confirm' then
+                    destroyPreview()
+                    return
+                end
+                local paid = lib.callback.await('esx_garage:payRelease', false, v.plate)
+                if not paid or not paid.ok then
+                    destroyPreview()
+                    lib.notify({ title = 'ชำระเงินล้มเหลว', description = paid and paid.reason or '', type = 'error' })
+                    return
+                end
+                -- spawn after pay
+                lib.requestModel(model)
+                local veh = CreateVehicle(joaat(model), spot.x, spot.y, spot.z, spot.w, true, false)
+                SetEntityAsMissionEntity(veh, true, true)
+                SetVehicleOnGroundProperly(veh)
+                SetVehicleNumberPlateText(veh, v.plate)
+                Entity(veh).state.isGarageVehicle = true
+                lastSpawn = veh
+                destroyPreview()
+                lib.notify({ title = ('รับรถ %s สำเร็จ'):format(v.plate), type = 'success' })
+            end
+        }
+    end
+    lib.registerContext({ id = 'esx_garage_impound', title = garage.label, options = options })
+    lib.showContext('esx_garage_impound')
 end
 
 local function openGarageMenu(garage)
-  currentGarage = garage
-  clearPreview()
-  local vehicles = lib.callback.await('esx_garage:getPlayerVehicles', false, garage.id)
-  local options = {}
-
-  for i=1, #vehicles do
-    local v = vehicles[i]
-    local status = v.impounded == 1 and 'IMP' or (v.stored == 1 and 'IN' or 'OUT')
-    local label = (v.vehicle and v.vehicle.model) or v.plate
-    options[#options+1] = {
-      title = ('%s [%s]'):format(v.plate, status),
-      description = label,
-      arrow = true,
-      onSelect = function() openVehicleSubmenu(garage, v) end
-    }
-  end
-
-  options[#options+1] = {
-    title = 'Impound',
-    description = 'รถที่ถูกยึด / ไถ่ถอน',
-    onSelect = function()
-      local list = lib.callback.await('esx_garage:getImpounded', false)
-      if #list == 0 then lib.notify({ title='ไม่มีรถถูกยึด' }); return end
-      local opts = {}
-      for i=1, #list do
-        local r = list[i]
-        opts[#opts+1] = {
-          title = ('%s | ค่าธรรมเนียม %d'):format(r.plate, r.impound_fee or 0),
-          onSelect = function()
-            local ok = lib.callback.await('esx_garage:releaseImpound', false, r.plate, currentGarage and currentGarage.id)
-            if ok and ok.ok then lib.notify({ title='ไถ่ถอนสำเร็จ', type='success' })
-            else lib.notify({ title='ไถ่ถอนไม่สำเร็จ', description=ok and ok.reason or '', type='error' }) end
-          end
-        }
-      end
-      lib.registerContext({ id='esx_garage_impound', title='Impound', options=opts })
-      lib.showContext('esx_garage_impound')
+    if garage.type == 'impound' then
+        openImpoundMenu(garage)
+        return
     end
-  }
 
-  lib.registerContext({ id='esx_garage_menu', title=garage.label, options=options })
-  lib.showContext('esx_garage_menu')
+    local vehicles = lib.callback.await('esx_garage:getPlayerVehicles', false, garage.id)
+    local options = {}
+
+    -- เก็บรถคันที่นั่งอยู่
+    if IsPedInAnyVehicle(PlayerPedId(), false) then
+        options[#options+1] = {
+            title = 'เก็บรถคันนี้',
+            icon = 'box',
+            onSelect = function()
+                local veh = GetVehiclePedIsIn(PlayerPedId(), false)
+                if veh == 0 then return end
+                local plate = string.upper(GetVehicleNumberPlateText(veh) or '')
+                if not isPlateValid(plate) then
+                    lib.notify({ title = 'ป้ายทะเบียนไม่ตรงรูปแบบ', type = 'error' })
+                    return
+                end
+                local ok = lib.callback.await('esx_garage:storeVehicle', false, plate, garage.id)
+                if ok and ok.ok then
+                    DeleteEntity(veh)
+                    lib.notify({ title = ('เก็บรถ %s แล้ว'):format(plate), type = 'success' })
+                else
+                    lib.notify({ title = 'เก็บรถไม่ได้', description = ok and ok.reason or '', type = 'error' })
+                end
+            end
+        }
+    end
+
+    for i = 1, #vehicles do
+        local v = vehicles[i]
+        local name = (v.vehicle and v.vehicle.model) or v.plate
+        local status = (v.stored == 1 and 'IN' or 'OUT')
+        options[#options+1] = {
+            title = ('%s [%s]'):format(v.plate, status),
+            description = name,
+            arrow = true,
+            onSelect = function()
+                if v.stored ~= 1 then
+                    lib.notify({ title = 'รถอยู่นอกโรง', type = 'error' })
+                    return
+                end
+                local spot = findFreeSpot(garage.spawn)
+                if not spot then
+                    lib.notify({ title = 'ไม่มีที่ว่าง', type = 'error' })
+                    return
+                end
+                showPreview(garage, (v.vehicle and v.vehicle.model) or 'adder', spot)
+                local ok = lib.alertDialog({
+                    header = ('สปอว์น %s'):format(v.plate),
+                    content = 'ยืนยันสปอว์นที่จุดที่ว่าง',
+                    centered = true,
+                    cancel = true
+                })
+                if ok ~= 'confirm' then
+                    destroyPreview()
+                    return
+                end
+
+                if not isPlateValid(v.plate) then
+                    destroyPreview()
+                    lib.notify({ title = 'ป้ายทะเบียนไม่ตรงรูปแบบ', type = 'error' })
+                    return
+                end
+
+                local grant = lib.callback.await('esx_garage:requestSpawn', false, v.plate, garage.id)
+                if not grant or not grant.ok then
+                    destroyPreview()
+                    lib.notify({ title = 'สปอว์นล้มเหลว', description = grant and grant.reason or '', type = 'error' })
+                    return
+                end
+
+                local model = (v.vehicle and v.vehicle.model) or 'adder'
+                lib.requestModel(model)
+                local veh = CreateVehicle(joaat(model), spot.x, spot.y, spot.z, spot.w, true, false)
+                SetEntityAsMissionEntity(veh, true, true)
+                SetVehicleOnGroundProperly(veh)
+                SetVehicleNumberPlateText(veh, v.plate)
+                Entity(veh).state.isGarageVehicle = true
+                lastSpawn = veh
+                destroyPreview()
+                lib.notify({ title = ('สปอว์น %s สำเร็จ'):format(v.plate), type = 'success' })
+            end
+        }
+    end
+
+    lib.registerContext({ id = 'esx_garage_menu', title = garage.label, options = options })
+    lib.showContext('esx_garage_menu')
 end
 
--- zones
+-- โซนเข้าใช้งาน: รองรับทั้ง target และ E
 CreateThread(function()
-  while GARAGES == nil or next(GARAGES) == nil do Wait(500) end
-  for _, g in ipairs(GARAGES) do
-    local zone = lib.zones.sphere({
-      coords=g.coord, radius=2.2, debug=false,
-      onEnter=function() lib.showTextUI('[E] เปิด Garage') end,
-      onExit=function() lib.hideTextUI(); clearPreview() end
-    })
-    zone:onKey('E', function() openGarageMenu(g) end)
-  end
+    for _, g in ipairs(Config.Garages) do
+        if usingTarget and exports.ox_target then
+            exports.ox_target:addSphereZone({
+                coords = g.coord,
+                radius = 2.0,
+                debug = false,
+                options = {
+                    {
+                        name = ('garage:%s'):format(g.id),
+                        label = ('เปิด %s'):format(g.label),
+                        icon = 'car',
+                        onSelect = function() openGarageMenu(g) end
+                    }
+                }
+            })
+        else
+            lib.zones.sphere({
+                coords = g.coord, radius = 2.0, debug = false,
+                onEnter = function() lib.showTextUI('[E] เปิด ' .. g.label) end,
+                onExit  = function() lib.hideTextUI() end
+            })
+        end
+    end
 end)
 
--- ox_target: Trunk / Glovebox with permission check
-CreateThread(function()
-  if not Config.UseOxInventory then return end
-  exports.ox_target:addGlobalVehicle({
-    {
-      name='esx_garage_trunk', icon='fa-solid fa-box-open', label='เปิดกระโปรงท้าย',
-      canInteract=function(entity) return Utils.matchPlate(GetVehicleNumberPlateText(entity)) end,
-      onSelect=function(data)
-        local plate = GetVehicleNumberPlateText(data.entity)
-        local ok = lib.callback.await('esx_garage:canOpenInventory', false, plate)
-        if ok then exports.ox_inventory:openInventory('trunk', plate)
-        else lib.notify({title='ไม่ได้รับอนุญาต', type='error'}) end
-      end
-    },
-    {
-      name='esx_garage_glove', icon='fa-solid fa-hand', label='เปิดเก๊ะหน้า',
-      canInteract=function(entity) return Utils.matchPlate(GetVehicleNumberPlateText(entity)) end,
-      onSelect=function(data)
-        local plate = GetVehicleNumberPlateText(data.entity)
-        local ok = lib.callback.await('esx_garage:canOpenInventory', false, plate)
-        if ok then exports.ox_inventory:openInventory('glovebox', plate)
-        else lib.notify({title='ไม่ได้รับอนุญาต', type='error'}) end
-      end
-    },
-    {
-      name='esx_garage_impound', icon='fa-solid fa-triangle-exclamation', label='ยึดรถ (Police)',
-      onSelect=function(data)
-        local plate = GetVehicleNumberPlateText(data.entity)
-        local input = lib.inputDialog('Impound Vehicle', {
-          {type='number', label='ค่าธรรมเนียม', default=Config.Impound.MinFee, min=Config.Impound.MinFee, max=Config.Impound.MaxFee}
-        })
-        if not input then return end
-        TriggerServerEvent('esx_garage:policeImpound', plate, input[1] or Config.Impound.MinFee)
-      end
-    }
-  })
-end)
+-- ปุ่มเปิดเมนูเมื่อยืนในโซน (fallback)
+RegisterKeyMapping('garage_open', 'เปิดเมนู Garage', 'keyboard', 'E')
+RegisterCommand('garage_open', function()
+    local ped = PlayerPedId()
+    local pos = GetEntityCoords(ped)
+    for _, g in ipairs(Config.Garages) do
+        if #(pos - g.coord) < 2.2 then
+            openGarageMenu(g)
+            break
+        end
+    end
+end, false)
 
--- test command
-RegisterCommand('garage', function()
-  for _, g in ipairs(GARAGES) do if g.id == 'legion_public' then openGarageMenu(g) return end end
+-- เฝ้ารถที่สปอว์นจาก garage ถ้าหาย/พัง ให้ impound อัตโนมัติ
+CreateThread(function()
+    while true do
+        Wait(3000)
+        if lastSpawn and DoesEntityExist(lastSpawn) then
+            if IsEntityDead(lastSpawn) then
+                local plate = string.upper(GetVehicleNumberPlateText(lastSpawn) or '')
+                if isPlateValid(plate) then
+                    TriggerServerEvent('esx_garage:autoImpound', plate)
+                end
+                lastSpawn = nil
+            end
+        elseif lastSpawn and not DoesEntityExist(lastSpawn) then
+            local plate = string.upper(GetVehicleNumberPlateText(lastSpawn) or '')
+            if isPlateValid(plate) then
+                TriggerServerEvent('esx_garage:autoImpound', plate)
+            end
+            lastSpawn = nil
+        end
+    end
 end)
