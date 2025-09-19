@@ -2,8 +2,8 @@ fx_version 'cerulean'
 game 'gta5'
 
 name 'esx_garage'
-description 'Global ESX Garage with zones/points, impound fixed price, active map, contract, blips'
-version '0.2.0'
+description 'Global ESX Garage with zones/points, fixed-price impound, active map, contract, blips'
+version '0.3.0'
 lua54 'yes'
 
 shared_scripts {
