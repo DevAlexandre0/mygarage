@@ -6,8 +6,28 @@ local activeCam = nil
 local previewVeh = nil
 
 local function isPlateValid(plate)
-    -- รูปแบบ "AAA 111"
     return plate and plate:match('^%u%u%u %d%d%d$') ~= nil
+end
+
+local function clamp(v, lo, hi)
+    if v < lo then return lo end
+    if v > hi then return hi end
+    return v
+end
+
+local function pctFromHealth(h) -- GTA health 0..1000
+    if not h then return nil end
+    return clamp(math.floor((h / 1000.0) * 100 + 0.5), 0, 100)
+end
+
+local function formatStatusStr(vj)
+    local eng = pctFromHealth(vj and vj.engineHealth)
+    local bod = pctFromHealth(vj and vj.bodyHealth)
+    local fuel = vj and vj.fuelLevel and clamp(math.floor(vj.fuelLevel + 0.5), 0, 100) or nil
+    local sEng = eng and (eng .. '%') or '-'
+    local sBod = bod and (bod .. '%') or '-'
+    local sFuel = fuel and (fuel .. '%') or '-'
+    return ('HP %s | Body %s | Fuel %s'):format(sEng, sBod, sFuel), eng, bod, fuel
 end
 
 local function destroyPreview()
@@ -22,16 +42,21 @@ local function destroyPreview()
     end
 end
 
-local function showPreview(garage, model, spot)
+local function showPreview(garage, model, spot, vj)
     destroyPreview()
     if not model or model == '' then model = 'adder' end
     lib.requestModel(model)
-    -- ยกตัวอย่างพรีวิวแบบ local-only และล็อกตำแหน่ง
     previewVeh = CreateVehicle(joaat(model), spot.x, spot.y, spot.z, spot.w, false, true)
     SetEntityCollision(previewVeh, false, false)
     FreezeEntityPosition(previewVeh, true)
     SetVehicleOnGroundProperly(previewVeh)
-    -- กล้องพรีวิว
+    -- apply visualized status if present
+    if vj then
+        if vj.engineHealth then SetVehicleEngineHealth(previewVeh, vj.engineHealth) end
+        if vj.bodyHealth then SetVehicleBodyHealth(previewVeh, vj.bodyHealth) end
+        if vj.fuelLevel then SetVehicleFuelLevel(previewVeh, vj.fuelLevel) end
+    end
+    -- camera
     local offset = garage.previewCamOffset or vec3(3.0, 3.0, 1.5)
     activeCam = CreateCam("DEFAULT_SCRIPTED_CAMERA", true)
     local camPos = GetOffsetFromEntityInWorldCoords(previewVeh, offset.x, offset.y, offset.z)
@@ -57,9 +82,10 @@ local function openImpoundMenu(garage)
     for i = 1, #vehicles do
         local v = vehicles[i]
         local model = (v.vehicle and v.vehicle.model) or 'adder'
+        local statusStr = formatStatusStr(v.vehicle)
         options[#options+1] = {
             title = ('%s | ค่าปลด %d'):format(v.plate, v.impound_fee or 0),
-            description = ('%s'):format(model),
+            description = ('%s | %s'):format(model, statusStr),
             arrow = true,
             onSelect = function()
                 local spot = findFreeSpot(garage.spawn)
@@ -67,7 +93,7 @@ local function openImpoundMenu(garage)
                     lib.notify({ title = 'ไม่มีที่ว่าง', type = 'error' })
                     return
                 end
-                showPreview(garage, model, spot)
+                showPreview(garage, model, spot, v.vehicle)
                 local ok = lib.alertDialog({
                     header = ('ปลดรถ %s'):format(v.plate),
                     content = ('ยืนยันชำระค่าปลด %d ?'):format(v.impound_fee or 0),
@@ -85,12 +111,16 @@ local function openImpoundMenu(garage)
                     lib.notify({ title = 'ชำระเงินล้มเหลว', description = paid and paid.reason or '', type = 'error' })
                     return
                 end
-                -- spawn after pay
                 lib.requestModel(model)
                 local veh = CreateVehicle(joaat(model), spot.x, spot.y, spot.z, spot.w, true, false)
                 SetEntityAsMissionEntity(veh, true, true)
                 SetVehicleOnGroundProperly(veh)
                 SetVehicleNumberPlateText(veh, v.plate)
+                if v.vehicle then
+                    if v.vehicle.engineHealth then SetVehicleEngineHealth(veh, v.vehicle.engineHealth) end
+                    if v.vehicle.bodyHealth then SetVehicleBodyHealth(veh, v.vehicle.bodyHealth) end
+                    if v.vehicle.fuelLevel then SetVehicleFuelLevel(veh, v.vehicle.fuelLevel) end
+                end
                 Entity(veh).state.isGarageVehicle = true
                 lastSpawn = veh
                 destroyPreview()
@@ -104,14 +134,13 @@ end
 
 local function openGarageMenu(garage)
     if garage.type == 'impound' then
-        openImpoundMenu(garage)
-        return
+        openImpoundMenu(garage); return
     end
 
     local vehicles = lib.callback.await('esx_garage:getPlayerVehicles', false, garage.id)
     local options = {}
 
-    -- เก็บรถคันที่นั่งอยู่
+    -- เก็บรถคันที่นั่งอยู่ พร้อม snapshot สถานะ
     if IsPedInAnyVehicle(PlayerPedId(), false) then
         options[#options+1] = {
             title = 'เก็บรถคันนี้',
@@ -124,7 +153,12 @@ local function openGarageMenu(garage)
                     lib.notify({ title = 'ป้ายทะเบียนไม่ตรงรูปแบบ', type = 'error' })
                     return
                 end
-                local ok = lib.callback.await('esx_garage:storeVehicle', false, plate, garage.id)
+                local status = {
+                    engine = GetVehicleEngineHealth(veh) or 1000.0,
+                    body = GetVehicleBodyHealth(veh) or 1000.0,
+                    fuel = GetVehicleFuelLevel(veh) or 50.0
+                }
+                local ok = lib.callback.await('esx_garage:storeVehicle', false, plate, garage.id, status)
                 if ok and ok.ok then
                     DeleteEntity(veh)
                     lib.notify({ title = ('เก็บรถ %s แล้ว'):format(plate), type = 'success' })
@@ -138,10 +172,11 @@ local function openGarageMenu(garage)
     for i = 1, #vehicles do
         local v = vehicles[i]
         local name = (v.vehicle and v.vehicle.model) or v.plate
+        local statusStr = formatStatusStr(v.vehicle)
         local status = (v.stored == 1 and 'IN' or 'OUT')
         options[#options+1] = {
             title = ('%s [%s]'):format(v.plate, status),
-            description = name,
+            description = ('%s | %s'):format(name, statusStr),
             arrow = true,
             onSelect = function()
                 if v.stored ~= 1 then
@@ -153,7 +188,7 @@ local function openGarageMenu(garage)
                     lib.notify({ title = 'ไม่มีที่ว่าง', type = 'error' })
                     return
                 end
-                showPreview(garage, (v.vehicle and v.vehicle.model) or 'adder', spot)
+                showPreview(garage, (v.vehicle and v.vehicle.model) or 'adder', spot, v.vehicle)
                 local ok = lib.alertDialog({
                     header = ('สปอว์น %s'):format(v.plate),
                     content = 'ยืนยันสปอว์นที่จุดที่ว่าง',
@@ -184,6 +219,11 @@ local function openGarageMenu(garage)
                 SetEntityAsMissionEntity(veh, true, true)
                 SetVehicleOnGroundProperly(veh)
                 SetVehicleNumberPlateText(veh, v.plate)
+                if v.vehicle then
+                    if v.vehicle.engineHealth then SetVehicleEngineHealth(veh, v.vehicle.engineHealth) end
+                    if v.vehicle.bodyHealth then SetVehicleBodyHealth(veh, v.vehicle.bodyHealth) end
+                    if v.vehicle.fuelLevel then SetVehicleFuelLevel(veh, v.vehicle.fuelLevel) end
+                end
                 Entity(veh).state.isGarageVehicle = true
                 lastSpawn = veh
                 destroyPreview()
@@ -223,7 +263,6 @@ CreateThread(function()
     end
 end)
 
--- ปุ่มเปิดเมนูเมื่อยืนในโซน (fallback)
 RegisterKeyMapping('garage_open', 'เปิดเมนู Garage', 'keyboard', 'E')
 RegisterCommand('garage_open', function()
     local ped = PlayerPedId()
@@ -236,7 +275,7 @@ RegisterCommand('garage_open', function()
     end
 end, false)
 
--- เฝ้ารถที่สปอว์นจาก garage ถ้าหาย/พัง ให้ impound อัตโนมัติ
+-- เฝ้ารถที่สปอว์น ถ้าหาย/พัง → auto impound
 CreateThread(function()
     while true do
         Wait(3000)
