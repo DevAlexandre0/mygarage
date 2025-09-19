@@ -1,174 +1,167 @@
 local ESX = exports['es_extended']:getSharedObject()
 
+-- ===== Utils
 local function getIdentifier(src)
-    local xPlayer = ESX.GetPlayerFromId(src)
-    return xPlayer and xPlayer.getIdentifier() or nil
+  local xPlayer = ESX.GetPlayerFromId(src)
+  return xPlayer and xPlayer.getIdentifier() or nil
 end
+local function isPlateValid(p) return p and p:match('^%u%u%u %d%d%d$') ~= nil end
+local function clamp(v, lo, hi) if v < lo then return lo elseif v > hi then return hi else return v end end
 
-local function hasJob(src, jobs)
-    local xPlayer = ESX.GetPlayerFromId(src)
-    if not xPlayer then return false end
-    local j = xPlayer.job and xPlayer.job.name or nil
-    if not j then return false end
-    for _, name in ipairs(jobs or {}) do
-        if name == j then return true end
-    end
-    return false
-end
+-- ===== Active map: plate -> { netId, owner, last=vec3?, ts=ms }
+local active = {}
 
-local function isPlateValid(plate)
-    return plate and plate:match('^%u%u%u %d%d%d$') ~= nil
-end
-
-local function clamp(v, lo, hi)
-    if v < lo then return lo end
-    if v > hi then return hi end
-    return v
-end
-
-lib.callback.register('esx_garage:getPlayerVehicles', function(source, garageId)
-    local identifier = getIdentifier(source)
-    if not identifier then return {} end
-
-    local rows = MySQL.query.await([[
-        SELECT plate, vehicle, stored, impounded, impound_fee, impound_until, garage_id
-        FROM owned_vehicles
-        WHERE owner = ? AND (garage_id IS NULL OR garage_id = ?)
-    ]], { identifier, garageId })
-
-    for i = #rows, 1, -1 do
-        local v = rows[i]
-        v.vehicle = json.decode(v.vehicle or '{}')
-        -- จำกัดเฉพาะรถ type = car ถ้ามี field; หากไม่มีถือว่า car
-        if v.vehicle and v.vehicle.type and v.vehicle.type ~= 'car' then
-            table.remove(rows, i)
-        end
-    end
-    return rows
+RegisterNetEvent('esx_garage:updateVehiclePos', function(plate, x, y, z, netId)
+  local src = source
+  plate = string.upper(plate or '')
+  if not isPlateValid(plate) then return end
+  local id = getIdentifier(src); if not id then return end
+  local e = active[plate]; if not e or e.owner ~= id or (netId and e.netId ~= netId) then return end
+  e.last = vec3(x, y, z); e.ts = GetGameTimer()
 end)
 
-lib.callback.register('esx_garage:getImpoundVehicles', function(source)
-    local identifier = getIdentifier(source)
-    if not identifier then return {} end
-    local rows = MySQL.query.await([[
-        SELECT plate, vehicle, impounded, impound_fee FROM owned_vehicles
-        WHERE owner = ? AND impounded = 1
-    ]], { identifier })
-    for i = 1, #rows do
-        rows[i].vehicle = json.decode(rows[i].vehicle or '{}')
-    end
-    return rows
+RegisterNetEvent('esx_garage:clearActive', function(plate)
+  plate = string.upper(plate or '')
+  active[plate] = nil
 end)
 
--- เก็บรถ
-lib.callback.register('esx_garage:storeVehicle', function(source, plate, garageId)
-    local identifier = getIdentifier(source)
-    if not identifier then return { ok = false, reason = 'noid' } end
-    plate = string.upper(plate or '')
-    if not isPlateValid(plate) then return { ok=false, reason='plate' } end
+-- ===== DB helpers
+local function readPlayerVehicles(identifier)
+  local rows = MySQL.query.await([[
+    SELECT plate, vehicle, stored, impounded, impound_fee
+    FROM owned_vehicles
+    WHERE owner = ?
+  ]], { identifier })
+  for i=1, #rows do rows[i].vehicle = json.decode(rows[i].vehicle or '{}') end
+  return rows
+end
 
-    local updated = MySQL.update.await(
-        'UPDATE owned_vehicles SET stored = 1, garage_id = ?, impounded = 0 WHERE owner = ? AND plate = ?',
-        { garageId, identifier, plate }
-    )
-    return (updated > 0) and { ok=true } or { ok=false, reason='notfound' }
-end)
-
--- ขอสิทธิ์สปอว์น: กันดิวปลิด้วย stored flag
-lib.callback.register('esx_garage:requestSpawn', function(source, plate, garageId)
-    local identifier = getIdentifier(source)
-    if not identifier then return { ok=false, reason='noid' } end
-    plate = string.upper(plate or '')
-    if not isPlateValid(plate) then return { ok=false, reason='plate' } end
-
-    local row = MySQL.single.await([[
-        SELECT stored, impounded FROM owned_vehicles
-        WHERE owner = ? AND plate = ? AND (garage_id IS NULL OR garage_id = ?)
-    ]], { identifier, plate, garageId })
-    if not row then return { ok=false, reason='notfound' } end
-    if row.impounded == 1 then return { ok=false, reason='impounded' } end
-    if row.stored ~= 1 then return { ok=false, reason='alreadyOut' } end
-
-    local ok = MySQL.update.await([[
-        UPDATE owned_vehicles SET stored = 0
-        WHERE owner = ? AND plate = ? AND stored = 1
-    ]], { identifier, plate })
-    if ok == 1 then
-        return { ok=true }
+-- ===== Callbacks: lists/state
+lib.callback.register('esx_garage:getPlayerVehicles', function(source)
+  local id = getIdentifier(source); if not id then return {} end
+  local rows = readPlayerVehicles(id)
+  for _, v in ipairs(rows) do
+    if v.impounded == 1 then
+      v.state = 'in_impound'
+    elseif v.stored == 1 then
+      v.state = 'in_garage'
     else
-        return { ok=false, reason='race' }
+      v.state = active[v.plate] and 'out_garage' or 'in_impound'
     end
+  end
+  return rows
 end)
 
--- Auto-impound เมื่อรถหาย/พัง
-RegisterNetEvent('esx_garage:autoImpound', function(plate)
-    plate = string.upper(plate or '')
-    if not isPlateValid(plate) then return end
-    local fee = clamp(Config.Impound.AutoFee or Config.Impound.MinFee, Config.Impound.MinFee, Config.Impound.MaxFee)
-    MySQL.update.await(
-        'UPDATE owned_vehicles SET impounded = 1, impound_fee = ?, stored = 1, garage_id = ? WHERE plate = ?',
-        { fee, Config.Impound.GarageId, plate }
-    )
+lib.callback.register('esx_garage:getImpoundedVehicles', function(source)
+  local id = getIdentifier(source); if not id then return {} end
+  local rows = MySQL.query.await('SELECT plate, vehicle FROM owned_vehicles WHERE owner = ? AND impounded = 1', { id })
+  for i=1, #rows do rows[i].vehicle = json.decode(rows[i].vehicle or '{}') end
+  return rows
 end)
 
--- ชำระเงินปลดรถจาก impound
-lib.callback.register('esx_garage:payRelease', function(source, plate)
-    local xPlayer = ESX.GetPlayerFromId(source)
-    if not xPlayer then return { ok=false, reason='noid' } end
-    plate = string.upper(plate or '')
-    if not isPlateValid(plate) then return { ok=false, reason='plate' } end
+lib.callback.register('esx_garage:getVehicleCoords', function(source, plate)
+  plate = string.upper(plate or '')
+  local id = getIdentifier(source); if not id then return { ok=false, reason='noid' } end
+  local e = active[plate]
+  if not e then return { ok=false, reason='not_active' } end
+  if e.owner ~= id then return { ok=false, reason='not_owner' } end
+  if not e.last then return { ok=false, reason='no_coords' } end
+  return { ok=true, coords={ x=e.last.x, y=e.last.y, z=e.last.z } }
+end)
 
-    local row = MySQL.single.await('SELECT impounded, impound_fee FROM owned_vehicles WHERE owner = ? AND plate = ?', { xPlayer.getIdentifier(), plate })
-    if not row or row.impounded ~= 1 then return { ok=false, reason='not_impounded' } end
+-- ===== Store / TakeOut
+lib.callback.register('esx_garage:storeVehicle', function(source, plate, status, netId)
+  local id = getIdentifier(source); if not id then return { ok=false, reason='noid' } end
+  plate = string.upper(plate or ''); if not isPlateValid(plate) then return { ok=false, reason='plate' } end
 
-    local fee = clamp(tonumber(row.impound_fee or 0), Config.Impound.MinFee, Config.Impound.MaxFee)
-    local account = Config.PayAccount or 'bank'
-    -- หักเงิน
-    if account == 'money' then
-        if xPlayer.getMoney() < fee then return { ok=false, reason='notenough' } end
-        xPlayer.removeMoney(fee)
-    else
-        if xPlayer.getAccount(account).money < fee then return { ok=false, reason='notenough' } end
-        xPlayer.removeAccountMoney(account, fee)
+  local row = MySQL.single.await('SELECT vehicle FROM owned_vehicles WHERE owner = ? AND plate = ?', { id, plate })
+  if not row then return { ok=false, reason='notfound' } end
+
+  local vj = json.decode(row.vehicle or '{}') or {}
+  if status then
+    if status.engine then vj.engineHealth = tonumber(status.engine) end
+    if status.body   then vj.bodyHealth   = tonumber(status.body)   end
+    if status.fuel   then vj.fuelLevel    = tonumber(status.fuel)   end
+  end
+  vj.type = vj.type or 'car'
+
+  local ok = MySQL.update.await('UPDATE owned_vehicles SET stored=1, impounded=0, vehicle=? WHERE owner=? AND plate=?',
+                                { json.encode(vj), id, plate })
+  if ok > 0 then
+    -- ลบเอนทิตีฝั่งเซิร์ฟเวอร์อย่างชัดเจนเพื่อลดซาก
+    if netId and NetworkDoesNetworkIdExist(netId) then
+      local ent = NetworkGetEntityFromNetworkId(netId)
+      if ent and DoesEntityExist(ent) then DeleteEntity(ent) end
     end
-    -- ปลด impound และพร้อมสปอว์น
-    MySQL.update.await('UPDATE owned_vehicles SET impounded = 0, stored = 1 WHERE owner = ? AND plate = ?', { xPlayer.getIdentifier(), plate })
+    active[plate] = nil
     return { ok=true }
+  else
+    return { ok=false, reason='update_fail' }
+  end
 end)
 
--- ===== Admin / Police tools =====
-ESX.RegisterCommand('impoundveh', 'admin', function(xPlayer, args)
-    local fee = clamp(args.fee or (Config.Impound.MinFee), Config.Impound.MinFee, Config.Impound.MaxFee)
-    MySQL.update.await('UPDATE owned_vehicles SET impounded = 1, impound_fee = ?, stored = 1, garage_id = ? WHERE plate = ?', { fee, Config.Impound.GarageId, args.plate })
-    xPlayer.showNotification(('ยึดรถ %s (fee %d)'):format(args.plate, fee))
-end, true, { help = 'Impound by plate', validate = true, arguments = { { name='plate', type='string' }, { name='fee', type='number', optional=true } } })
+lib.callback.register('esx_garage:takeOutVehicle', function(source, plate)
+  local id = getIdentifier(source); if not id then return { ok=false, reason='noid' } end
+  plate = string.upper(plate or ''); if not isPlateValid(plate) then return { ok=false, reason='plate' } end
 
-ESX.RegisterCommand('vrelease', 'admin', function(xPlayer, args)
-    MySQL.update.await('UPDATE owned_vehicles SET impounded = 0, stored = 1 WHERE plate = ?', { args.plate })
-    xPlayer.showNotification(('ปลดรถ %s'):format(args.plate))
-end, true, { help = 'Force release impound', validate = true, arguments = { { name='plate', type='string' } } })
+  local row = MySQL.single.await('SELECT stored, impounded, vehicle FROM owned_vehicles WHERE owner=? AND plate=?', { id, plate })
+  if not row then return { ok=false, reason='notfound' } end
+  if row.impounded == 1 then return { ok=false, reason='impounded' } end
+  if row.stored ~= 1 then return { ok=false, reason='already_out' } end
 
-ESX.RegisterCommand('vfind', 'admin', function(xPlayer, args)
-    local row = MySQL.single.await('SELECT owner, stored, impounded, garage_id FROM owned_vehicles WHERE plate = ?', { args.plate })
-    if not row then
-        xPlayer.showNotification('ไม่พบรถ')
-        return
-    end
-    xPlayer.showNotification(('stored=%s impounded=%s garage=%s'):format(row.stored, row.impounded, row.garage_id or 'nil'))
-end, true, { help = 'Lookup vehicle by plate', validate = true, arguments = { { name='plate', type='string' } } })
+  local ok = MySQL.update.await('UPDATE owned_vehicles SET stored=0 WHERE owner=? AND plate=? AND stored=1', { id, plate })
+  if ok ~= 1 then return { ok=false, reason='race' } end
 
-ESX.RegisterCommand('vsetgarage', 'admin', function(xPlayer, args)
-    MySQL.update.await('UPDATE owned_vehicles SET garage_id = ? WHERE plate = ?', { args.garage, args.plate })
-    xPlayer.showNotification(('ย้าย %s ไป %s'):format(args.plate, args.garage))
-end, true, { help = 'Set vehicle garage_id', validate = true, arguments = { { name='plate', type='string' }, { name='garage', type='string' } } })
+  local props = json.decode(row.vehicle or '{}') or {}
+  return { ok=true, props=props }
+end)
 
--- Police-only convenient command
-ESX.RegisterCommand('pdimpound', 'user', function(xPlayer, args)
-    if not hasJob(xPlayer.source, Config.Impound.Jobs) then
-        xPlayer.showNotification('ไม่มีสิทธิ์')
-        return
-    end
-    local fee = clamp(args.fee or Config.Impound.MinFee, Config.Impound.MinFee, Config.Impound.MaxFee)
-    MySQL.update.await('UPDATE owned_vehicles SET impounded = 1, impound_fee = ?, stored = 1, garage_id = ? WHERE plate = ?', { fee, Config.Impound.GarageId, args.plate })
-    xPlayer.showNotification(('ตำรวจยึด %s (fee %d)'):format(args.plate, fee))
-end, true, { help = 'Police impound', validate = true, arguments = { { name='plate', type='string' }, { name='fee', type='number', optional=true } } })
+-- ===== Server-side spawn & register
+lib.callback.register('esx_garage:spawnOwnedVehicle', function(source, data)
+  local id = getIdentifier(source); if not id then return { ok=false, reason='noid' } end
+  local plate = string.upper(data.plate or ''); if not isPlateValid(plate) then return { ok=false, reason='plate' } end
+  local model = data.model or 'adder'
+  local x,y,z,w = data.pos.x, data.pos.y, data.pos.z, data.pos.w
+
+  lib.requestModel(model) -- server-safe
+  local veh = CreateVehicle(joaat(model), x, y, z, w or 0.0, true, true)
+  if not veh or veh == 0 then return { ok=false, reason='create_fail' } end
+
+  SetEntityAsMissionEntity(veh, true, true)
+  SetVehicleOnGroundProperly(veh)
+  SetVehicleNumberPlateText(veh, plate)
+  local netId = NetworkGetNetworkIdFromEntity(veh)
+  if not netId then DeleteEntity(veh); return { ok=false, reason='net_fail' } end
+
+  active[plate] = { netId = netId, owner = id, last = vec3(x, y, z), ts = GetGameTimer() }
+  return { ok=true, netId=netId }
+end)
+
+-- ===== Impound: fixed price
+lib.callback.register('esx_garage:payRelease', function(source, plate)
+  local xPlayer = ESX.GetPlayerFromId(source); if not xPlayer then return { ok=false, reason='noid' } end
+  plate = string.upper(plate or ''); if not isPlateValid(plate) then return { ok=false, reason='plate' } end
+
+  local row = MySQL.single.await('SELECT impounded FROM owned_vehicles WHERE owner=? AND plate=?', { xPlayer.getIdentifier(), plate })
+  if not row or row.impounded ~= 1 then return { ok=false, reason='not_impounded' } end
+
+  local fee = clamp(tonumber(Config.ImpoundPrice or 0), 0, 10000000)
+  local account = Config.PayAccount or 'bank'
+  if account == 'money' then
+    if xPlayer.getMoney() < fee then return { ok=false, reason='notenough' } end
+    xPlayer.removeMoney(fee)
+  else
+    if xPlayer.getAccount(account).money < fee then return { ok=false, reason='notenough' } end
+    xPlayer.removeAccountMoney(account, fee)
+  end
+  MySQL.update.await('UPDATE owned_vehicles SET impounded=0, stored=1 WHERE owner=? AND plate=?', { xPlayer.getIdentifier(), plate })
+  return { ok=true }
+end)
+
+-- Auto-impound เมื่อหาย/พัง
+RegisterNetEvent('esx_garage:autoImpound', function(plate)
+  plate = string.upper(plate or '')
+  if not isPlateValid(plate) then return end
+  MySQL.update.await('UPDATE owned_vehicles SET impounded=1, stored=1 WHERE plate=?', { plate })
+  active[plate] = nil
+end)
