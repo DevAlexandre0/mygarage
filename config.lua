@@ -1,41 +1,31 @@
 Config = {}
 
--- การเงิน
-Config.PayAccount = 'bank'          -- 'bank' หรือ 'money'
-Config.ImpoundPrice = 2500          -- ราคาเดียวทั้งระบบ
+-- ชื่อตารางตามที่กำหนด
+Config.VehicleTable = 'owned_vehicle'
 
--- ไอเท็มสัญญา
-Config.ContractItem = 'veh_contract'
-
--- ทั่วไป
-Config.PlatePattern = 'AAA 111'     -- ใช้ตรวจรูปแบบ ^%u%u%u %d%d%d$
-Config.DespawnOnStore = true
-Config.SpawnRadiusCheck = 3.5       -- กันสปอว์นทับ
-Config.PositionUpdateInterval = 5000 -- ms ส่งพิกัด active แบบ threshold
-
--- จุด Garage/Impound (global access)
+-- จุดเข้า/ออกหลายตำแหน่ง
 Config.Garages = {
+  -- NFS Heat style: ช่องจอดหน้าโรงรถ
   {
-    id='legion_public', label='Legion Public Garage', type='public',
-    coord=vec3(215.8, -810.1, 30.7), heading=160.0,
-    spawn={
-      vec4(223.1, -804.6, 30.6, 157.5),
-      vec4(226.5, -802.0, 30.6, 157.5),
-      vec4(229.6, -799.8, 30.6, 157.5)
-    }
+    id = 'pillbox_garage',
+    label = 'Garage A',
+    enter = vec3(215.124, -791.294, 30.80),
+    spawn = vec4(222.68, -804.32, 30.61, 248.0),
+    radius = 2.0,
+    blip = { sprite = 357, color = 3, scale = 0.7 }
   },
   {
-    id='impound_public', label='City Impound', type='impound',
-    coord=vec3(409.2, -1623.2, 29.3), heading=230.0,
-    spawn={
-      vec4(402.8, -1643.8, 29.3, 230.0),
-      vec4(398.5, -1646.7, 29.3, 230.0)
-    }
+    id = 'vespucci_garage',
+    label = 'Garage B',
+    enter = vec3(-1153.36, -1990.68, 13.18),
+    spawn = vec4(-1156.92, -2004.32, 13.18, 316.0),
+    radius = 2.0,
+    blip = { sprite = 357, color = 3, scale = 0.7 }
   }
 }
 
--- Blips
-Config.Blips = {
-  { sprite=50,  color=3,  scale=0.75, label='Public Garage', type='public'  },
-  { sprite=67,  color=1,  scale=0.75, label='Impound',       type='impound' },
-}
+-- ป้องกันสแปมสลับรถ
+Config.SwitchCooldown = 3000 -- ms
+
+-- โหมดดีบัก
+Config.Debug = true
