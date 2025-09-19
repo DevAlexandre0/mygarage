@@ -1,30 +1,36 @@
 fx_version 'cerulean'
 game 'gta5'
 
-name 'esx_garage'
-description 'Global ESX Garage with zones/points, fixed-price impound, active map, contract, blips'
-version '0.3.0'
+name 'esx_nfs_garage'
+author 'Gesus'
+version '1.0.0'
+
 lua54 'yes'
+
+dependencies {
+  'es_extended',    -- ESX Legacy
+  'oxmysql',
+  'ox_lib'
+}
 
 shared_scripts {
   '@ox_lib/init.lua',
-  'config.lua',
-  'shared/*.lua'
-}
-
-client_scripts {
-  'client/main.lua',
-  'client/blips.lua'
+  'config.lua'
 }
 
 server_scripts {
   '@oxmysql/lib/MySQL.lua',
-  'server/main.lua',
-  'server/contract.lua'
+  'server/sv_garage.lua'
 }
 
-dependencies {
-  'es_extended',
-  'ox_lib',
-  'oxmysql'
+client_scripts {
+  'client/cl_garage.lua'
+}
+
+ui_page 'html/index.html'
+
+files {
+  'html/index.html',
+  'html/style.css',
+  'html/script.js'
 }
